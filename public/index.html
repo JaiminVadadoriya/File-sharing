@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Secure File Transfer</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+    .upload-container { border: 2px dashed #ccc; border-radius: 10px; padding: 30px; text-align: center; margin-top: 20px; }
+    #uploadBtn { background: #4CAF50; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; transition: background 0.3s; }
+    #uploadBtn:hover { background: #45a049; }
+    .progress-container { width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px; margin: 20px 0; overflow: hidden; }
+    #progressBar { width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease; }
+    #status { color: #666; margin: 10px 0; min-height: 24px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Secure File Transfer</h1>
+  <div class="upload-container">
+    <button id="uploadBtn">Select File</button>
+    <input type="file" id="fileInput" class="hidden">
+    <div class="progress-container">
+      <div id="progressBar"></div>
+    </div>
+    <div id="status">Select a file to begin</div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io('http://localhost:3000');
+    const CHUNK_SIZE = 16384;
+    const MAX_BUFFER = 4 * 1024 * 1024;
+    
+    let peerConnection, dataChannel, encryptionKey;
+    let isChannelOpen = false;
+    let isSending = false;
+
+    // UI Elements
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const progressBar = document.getElementById('progressBar');
+    const status = document.getElementById('status');
+
+    uploadBtn.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      resetUI();
+      try {
+        await initializeWebRTC(file);
+      } catch (err) {
+        handleError('Initialization failed', err);
+      }
+    });
+
+    async function initializeWebRTC(file) {
+      peerConnection = new RTCPeerConnection();
+      
+      // Create data channel with proper configuration
+      dataChannel = peerConnection.createDataChannel('fileTransfer', {
+        ordered: true,
+        maxRetransmits: 0
+      });
+
+      setupDataChannelHandlers();
+      setupEncryption(file);
+      setupICECandidates();
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      socket.emit('offer', offer);
+    }
+
+    function setupDataChannelHandlers() {
+      dataChannel.onopen = () => {
+        isChannelOpen = true;
+        status.textContent = 'Starting upload...';
+        startFileTransfer(fileInput.files[0]);
+      };
+
+      dataChannel.onclose = () => {
+        isChannelOpen = false;
+        status.textContent = 'Connection closed';
+      };
+
+      dataChannel.onerror = (err) => {
+        handleError('Data channel error', err);
+        isChannelOpen = false;
+      };
+    }
+
+    async function setupEncryption(file) {
+      const rawKey = crypto.getRandomValues(new Uint8Array(32));
+      encryptionKey = await crypto.subtle.importKey(
+        'raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']
+      );
+      socket.emit('metadata', {
+        key: Array.from(rawKey),
+        fileName: file.name
+      });
+    }
+
+    function setupICECandidates() {
+      peerConnection.onicecandidate = (e) => {
+        if (e.candidate) socket.emit('ice-candidate', e.candidate);
+      };
+    }
+
+    async function startFileTransfer(file) {
+      if (!isChannelOpen) return;
+      
+      const fileStream = file.stream();
+      const reader = fileStream.getReader();
+      let offset = 0;
+      isSending = true;
+
+      try {
+        while (isSending && offset < file.size) {
+          if (!checkChannelState()) break;
+          if (dataChannel.bufferedAmount > MAX_BUFFER) {
+            await wait(50);
+            continue;
+          }
+
+          const { done, value } = await reader.read();
+          if (done) {
+            sendCompletionSignal();
+            break;
+          }
+
+          const packet = await encryptChunk(value);
+          if (dataChannel.readyState === 'open') {
+            dataChannel.send(packet);
+            offset += value.byteLength;
+            updateProgress(offset, file.size);
+          }
+        }
+      } catch (err) {
+        handleError('Upload error', err);
+      } finally {
+        cleanup();
+      }
+    }
+
+    async function encryptChunk(chunk) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, tagLength: 128 },
+        encryptionKey,
+        chunk
+      );
+      const encryptedBytes = new Uint8Array(encrypted);
+      return new Uint8Array([
+        ...iv,
+        ...encryptedBytes.slice(0, -16),
+        ...encryptedBytes.slice(-16)
+      ]);
+    }
+
+    function checkChannelState() {
+      if (!isChannelOpen || dataChannel.readyState !== 'open') {
+        handleError('Channel closed during transfer');
+        return false;
+      }
+      return true;
+    }
+
+    function sendCompletionSignal() {
+      if (dataChannel.readyState === 'open') {
+        dataChannel.send(JSON.stringify({ type: 'complete' }));
+      }
+    }
+
+    function updateProgress(sent, total) {
+      const percent = Math.round((sent / total) * 100);
+      progressBar.style.width = `${percent}%`;
+      status.textContent = `Uploading: ${percent}% (${formatBytes(sent)}/${formatBytes(total)})`;
+    }
+
+    function formatBytes(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB'];
+      if (bytes === 0) return '0B';
+      const exp = Math.floor(Math.log(bytes) / Math.log(1024));
+      return `${(bytes / 1024 ** exp).toFixed(2)} ${units[exp]}`;
+    }
+
+    function cleanup() {
+      isSending = false;
+      if (dataChannel.readyState === 'open') dataChannel.close();
+    }
+
+    function resetUI() {
+      progressBar.style.width = '0%';
+      status.textContent = 'Initializing...';
+    }
+
+    function handleError(message, err) {
+      console.error(message, err);
+      status.textContent = message;
+      isSending = false;
+      isChannelOpen = false;
+    }
+
+    function wait(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // WebRTC Signaling
+    socket.on('answer', async (answer) => {
+      try {
+        await peerConnection.setRemoteDescription(answer);
+      } catch (err) {
+        handleError('Answer error', err);
+      }
+    });
+
+    socket.on('ice-candidate', async (candidate) => {
+      try {
+        await peerConnection.addIceCandidate(candidate);
+      } catch (err) {
+        handleError('ICE candidate error', err);
+      }
+    });
+  </script>
+</body>
+</html>
