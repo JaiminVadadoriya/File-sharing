@@ -605,6 +605,14 @@ function finalizeTransfer(state, socket) {
       fileSize: state.bytesReceived,
       fileHash: fileHash,
     });
+
+    state.dataChannel.send(
+      JSON.stringify({
+        type: "status",
+        status: "completed",
+        fileHash: fileHash,
+      })
+    );
     
     // Set a timeout to check again later
     setTimeout(() => {

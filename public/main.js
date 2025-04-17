@@ -126,6 +126,9 @@ function processQueue() {
   if (!fileEntry) return;
 
   currentFile = fileEntry;
+  verifyFileIntegrity(fileEntry.file).then((hash) => {
+    currentFile.fileHash= hash;
+  });
   currentFile.status = "preparing";
   renderFileList();
 
@@ -206,7 +209,20 @@ function setupSocketEvents() {
           renderFileList(); // Update the UI immediately with download link
         }
       }
-      setTimeout(loadFiles, 1000);
+      console.log("Transfer completed:", data);
+      if (
+        data.name == currentFile.file.name &&
+        data.fileHash == currentFile.fileHash
+      ) {
+        // If the completed file is the current one, reset the transfer state
+        currentFile.status = "completed";
+        currentFile.downloadUrl = data.downloadUrl || null;
+        console.log(
+          `File ${currentFile.file.name} completed with download URL: ${data.downloadUrl}`
+        );
+
+        setTimeout(loadFiles, 1000);
+      }
     }
   });
 }
@@ -667,6 +683,19 @@ function continueUpload() {
 
 // Finalize transfer
 function finalizeTransfer(fileEntry) {
+  if(currentFile.status == "completed") {
+    // Cleanup current transfer
+    resetTransfer();
+
+    // Mark file as completed
+    fileEntry.status = "completed";
+    updateStatus(`Upload completed for ${fileEntry.file.name}`);
+    renderFileList();
+
+    // Process next file
+    setTimeout(processQueue, 1000);
+    return;
+  }
   // First, confirm with server that all chunks were received
   if (isChannelOpen && dataChannel && dataChannel.readyState === "open") {
     dataChannel.send(
@@ -736,12 +765,9 @@ function handleTransferInterruption(fileEntry) {
 
 // Handle transfer status from server
 function handleTransferStatus(data) {
-  if (
-    data.status === "completed" &&
-    currentFile &&
-    data.fileId === currentFile.id
-  ) {
+  if (data.status === "completed" && currentFile && data.fileHash === currentFile.fileHash) {
     currentFile.status = "completed";
+    console.log("dokho");
 
     // Store the download URL if provided
     if (data.downloadUrl) {
@@ -756,7 +782,7 @@ function handleTransferStatus(data) {
   } else if (
     data.status === "incomplete" &&
     currentFile &&
-    data.fileId === currentFile.id
+    data.fileHash === currentFile.fileHash
   ) {
     // Server indicates that not all data has been received
     console.log(
@@ -1214,26 +1240,60 @@ function escapeHTML(str) {
     .replace(/'/g, "&#039;");
 }
 
+async function verifyFileIntegrity(file) {
+  try {
+    // Create a FileReader to read the file
+    const fileReader = new FileReader();
+
+    // Return a promise that resolves when the file is read and the hash is calculated
+    return new Promise((resolve, reject) => {
+      fileReader.onload = async () => {
+        try {
+          // Get the file buffer (ArrayBuffer)
+          const fileBuffer = fileReader.result;
+
+          // Calculate the SHA-256 hash using crypto.subtle.digest
+          const hashBuffer = await crypto.subtle.digest("SHA-256", fileBuffer);
+
+          // Convert the hash buffer into a hex string
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          const hashHex = hashArray
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join("");
+
+          // Return the calculated hash
+          resolve(hashHex);
+        } catch (err) {
+          console.error(`Error calculating hash: ${err.message}`);
+          reject(err);
+        }
+      };
+
+      // Handle any error that occurs during the file reading process
+      fileReader.onerror = () => {
+        console.error("Error reading file:", fileReader.error);
+        reject(fileReader.error);
+      };
+
+      // Read the file as an ArrayBuffer
+      fileReader.readAsArrayBuffer(file);
+    });
+  } catch (err) {
+    console.error(`Integrity verification failed: ${err.message}`);
+    return null;
+  }
+}
+
 // Load files when page is ready
 document.addEventListener("DOMContentLoaded", () => {
   loadFiles();
 
   // Refresh file list when a file upload completes
-  socket.on("transfer-status", (data) => {
-    handleTransferStatus(data);
-    if (data.status === "completed") {
-      // Store the download URL if provided
-      if (data.downloadUrl) {
-        // Find the file in queue and add the download URL
-        const fileEntry = fileQueue.find((f) => f.id === data.fileId);
-        if (fileEntry) {
-          fileEntry.downloadUrl = data.downloadUrl;
-          renderFileList(); // Update the UI immediately with download link
-        }
-      }
-      setTimeout(loadFiles, 1000);
-    }
-  });
+  // socket.on("transfer-status", (data) => {
+  //   if (data.status === "completed") {
+  //     setTimeout(loadFiles, 1000);
+  //   }
+  // });
 });
 
 // Initialize the app when the page loads
