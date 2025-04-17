@@ -1,5 +1,3 @@
-PORT = 3000;
-SERVER_URL= `http://localhost:${PORT}`;
 
 // Configuration
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
@@ -138,8 +136,8 @@ function connectSocket() {
   if (socket) {
     socket.disconnect();
   }
-  console.log("Connecting to server...", SERVER_URL);
-  socket = io(SERVER_URL, {
+
+  socket = io(window.location.href, {
     reconnectionAttempts: MAX_RETRIES,
     reconnectionDelay: RECONNECT_DELAY,
     timeout: 10000,
