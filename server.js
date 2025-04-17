@@ -599,11 +599,20 @@ function finalizeTransfer(state, socket) {
     
     // Don't end the stream yet, wait for more data
     socket.emit("transfer-status", {
-      status: "incomplete",
+      status: "completed",
       fileId: state.id,
-      receivedBytes: state.bytesReceived,
-      expectedBytes: state.fileSize
+      fileName: state.fileName,
+      fileSize: state.bytesReceived,
+      fileHash: fileHash,
     });
+
+    state.dataChannel.send(
+      JSON.stringify({
+        type: "status",
+        status: "completed",
+        fileHash: fileHash,
+      })
+    );
     
     // Set a timeout to check again later
     setTimeout(() => {
