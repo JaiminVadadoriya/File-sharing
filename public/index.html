@@ -1,229 +1,1041 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Secure File Transfer</title>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-    .upload-container { border: 2px dashed #ccc; border-radius: 10px; padding: 30px; text-align: center; margin-top: 20px; }
-    #uploadBtn { background: #4CAF50; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; transition: background 0.3s; }
-    #uploadBtn:hover { background: #45a049; }
-    .progress-container { width: 100%; height: 20px; background: #f0f0f0; border-radius: 10px; margin: 20px 0; overflow: hidden; }
-    #progressBar { width: 0%; height: 100%; background: #4CAF50; transition: width 0.3s ease; }
-    #status { color: #666; margin: 10px 0; min-height: 24px; }
-    .hidden { display: none; }
-  </style>
-</head>
-<body>
-  <h1>Secure File Transfer</h1>
-  <div class="upload-container">
-    <button id="uploadBtn">Select File</button>
-    <input type="file" id="fileInput" class="hidden">
-    <div class="progress-container">
-      <div id="progressBar"></div>
-    </div>
-    <div id="status">Select a file to begin</div>
-  </div>
-
-  <script src="/socket.io/socket.io.js"></script>
-  <script>
-    const socket = io('http://localhost:3000');
-    const CHUNK_SIZE = 16384;
-    const MAX_BUFFER = 4 * 1024 * 1024;
-    
-    let peerConnection, dataChannel, encryptionKey;
-    let isChannelOpen = false;
-    let isSending = false;
-
-    // UI Elements
-    const uploadBtn = document.getElementById('uploadBtn');
-    const fileInput = document.getElementById('fileInput');
-    const progressBar = document.getElementById('progressBar');
-    const status = document.getElementById('status');
-
-    uploadBtn.addEventListener('click', () => fileInput.click());
-
-    fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      resetUI();
-      try {
-        await initializeWebRTC(file);
-      } catch (err) {
-        handleError('Initialization failed', err);
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Secure File Transfer</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f5f5f5;
       }
-    });
+      .upload-container {
+        border: 2px dashed #ccc;
+        border-radius: 10px;
+        padding: 30px;
+        text-align: center;
+        margin-top: 20px;
+        background-color: white;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      #uploadBtn {
+        background: #4caf50;
+        color: white;
+        padding: 12px 24px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background 0.3s;
+      }
+      #uploadBtn:hover {
+        background: #45a049;
+      }
+      .progress-container {
+        width: 100%;
+        height: 20px;
+        background: #f0f0f0;
+        border-radius: 10px;
+        margin: 20px 0;
+        overflow: hidden;
+      }
+      #progressBar {
+        width: 0%;
+        height: 100%;
+        background: #4caf50;
+        transition: width 0.3s ease;
+      }
+      #status {
+        color: #666;
+        margin: 10px 0;
+        min-height: 24px;
+      }
+      .hidden {
+        display: none;
+      }
+      .file-list {
+        margin-top: 20px;
+        text-align: left;
+      }
+      .file-item {
+        padding: 10px;
+        border-bottom: 1px solid #eee;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .file-info {
+        flex-grow: 1;
+      }
+      .file-actions {
+        margin-left: 10px;
+      }
+      .retry-btn {
+        background: #2196f3;
+        color: white;
+        padding: 5px 10px;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      .retry-btn:hover {
+        background: #0b7dda;
+      }
+      .drop-zone {
+        border: 3px dashed #ccc;
+        border-radius: 10px;
+        padding: 40px;
+        text-align: center;
+        transition: all 0.3s;
+      }
+      .drop-zone.active {
+        border-color: #4caf50;
+        background-color: rgba(76, 175, 80, 0.1);
+      }
+      .connection-status {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        padding: 5px 10px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+      .connected {
+        background-color: #4caf50;
+        color: white;
+      }
+      .disconnected {
+        background-color: #f44336;
+        color: white;
+      }
+      .reconnecting {
+        background-color: #ff9800;
+        color: white;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="connection-status disconnected" id="connectionStatus">
+      Disconnected
+    </div>
+    <h1>Secure File Transfer</h1>
 
-    async function initializeWebRTC(file) {
-      peerConnection = new RTCPeerConnection();
-      
-      // Create data channel with proper configuration
-      dataChannel = peerConnection.createDataChannel('fileTransfer', {
-        ordered: true,
-        maxRetransmits: 0
-      });
+    <div class="upload-container">
+      <div class="drop-zone" id="dropZone">
+        <p>Drag files here or</p>
+        <button id="uploadBtn">Select Files</button>
+        <input type="file" id="fileInput" class="hidden" multiple />
+      </div>
 
-      setupDataChannelHandlers();
-      setupEncryption(file);
-      setupICECandidates();
+      <div class="progress-container">
+        <div id="progressBar"></div>
+      </div>
+      <div id="status">Ready to transfer files</div>
 
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      socket.emit('offer', offer);
-    }
+      <div class="file-list" id="fileList"></div>
+    </div>
 
-    function setupDataChannelHandlers() {
-      dataChannel.onopen = () => {
-        isChannelOpen = true;
-        status.textContent = 'Starting upload...';
-        startFileTransfer(fileInput.files[0]);
-      };
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      // Configuration
+      const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+      const MAX_BUFFER = 1 * 1024 * 1024; // 1MB buffer limit
+      const RECONNECT_DELAY = 3000; // 3 seconds
+      const MAX_RETRIES = 5;
 
-      dataChannel.onclose = () => {
-        isChannelOpen = false;
-        status.textContent = 'Connection closed';
-      };
+      // State variables
+      let socket;
+      let peerConnection = null;
+      let dataChannel = null;
+      let encryptionKey = null;
+      let fileQueue = [];
+      let currentFile = null;
+      let currentFileReader = null;
+      let currentFileOffset = 0;
+      let isChannelOpen = false;
+      let isSending = false;
+      let isPaused = false;
+      let retryCount = 0;
+      let transferStartTime = 0;
+      let transferSessionId = null;
+      let lastProgressUpdate = 0;
+      let reconnectTimeout = null;
 
-      dataChannel.onerror = (err) => {
-        handleError('Data channel error', err);
-        isChannelOpen = false;
-      };
-    }
+      // UI Elements
+      const uploadBtn = document.getElementById("uploadBtn");
+      const fileInput = document.getElementById("fileInput");
+      const dropZone = document.getElementById("dropZone");
+      const progressBar = document.getElementById("progressBar");
+      const status = document.getElementById("status");
+      const fileList = document.getElementById("fileList");
+      const connectionStatus = document.getElementById("connectionStatus");
 
-    async function setupEncryption(file) {
-      const rawKey = crypto.getRandomValues(new Uint8Array(32));
-      encryptionKey = await crypto.subtle.importKey(
-        'raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']
-      );
-      socket.emit('metadata', {
-        key: Array.from(rawKey),
-        fileName: file.name
-      });
-    }
+      // Initialize the application
+      function initialize() {
+        setupEventListeners();
+        connectSocket();
+      }
 
-    function setupICECandidates() {
-      peerConnection.onicecandidate = (e) => {
-        if (e.candidate) socket.emit('ice-candidate', e.candidate);
-      };
-    }
+      // Set up event listeners
+      function setupEventListeners() {
+        // Upload button click
+        uploadBtn.addEventListener("click", () => fileInput.click());
 
-    async function startFileTransfer(file) {
-      if (!isChannelOpen) return;
-      
-      const fileStream = file.stream();
-      const reader = fileStream.getReader();
-      let offset = 0;
-      isSending = true;
+        // File selection
+        fileInput.addEventListener("change", handleFileSelection);
 
-      try {
-        while (isSending && offset < file.size) {
-          if (!checkChannelState()) break;
-          if (dataChannel.bufferedAmount > MAX_BUFFER) {
+        // Drag and drop
+        dropZone.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          dropZone.classList.add("active");
+        });
+
+        dropZone.addEventListener("dragleave", () => {
+          dropZone.classList.remove("active");
+        });
+
+        dropZone.addEventListener("drop", (e) => {
+          e.preventDefault();
+          dropZone.classList.remove("active");
+          if (e.dataTransfer.files.length > 0) {
+            handleFiles(e.dataTransfer.files);
+          }
+        });
+
+        // Online/offline events
+        window.addEventListener("online", () => {
+          updateConnectionStatus("Reconnecting...");
+          connectSocket();
+        });
+
+        window.addEventListener("offline", () => {
+          updateConnectionStatus("Disconnected");
+          handleDisconnect();
+        });
+
+        // Before unload warning
+        window.addEventListener("beforeunload", (e) => {
+          if (isSending) {
+            e.preventDefault();
+            e.returnValue =
+              "You have an ongoing file transfer. Are you sure you want to leave?";
+            return e.returnValue;
+          }
+        });
+      }
+
+      // Handle file selection
+      function handleFileSelection(e) {
+        handleFiles(e.target.files);
+        fileInput.value = ""; // Reset input to allow selecting same files again
+      }
+
+      // Handle files (from input or drop)
+      function handleFiles(files) {
+        for (const file of files) {
+          addFileToQueue(file);
+        }
+        processQueue();
+      }
+
+      // Add file to queue
+      function addFileToQueue(file) {
+        const fileId = generateFileId();
+        const fileEntry = {
+          id: fileId,
+          file: file,
+          status: "queued",
+          progress: 0,
+          retries: 0,
+        };
+
+        fileQueue.push(fileEntry);
+        renderFileList();
+      }
+
+      // Process the queue
+      function processQueue() {
+        if (isSending || fileQueue.length === 0) return;
+
+        // Get the first queued file
+        const fileEntry = fileQueue.find((f) => f.status === "queued");
+        if (!fileEntry) return;
+
+        currentFile = fileEntry;
+        currentFile.status = "preparing";
+        renderFileList();
+
+        // Start the transfer
+        startFileTransfer(currentFile);
+      }
+
+      // Connect socket
+      function connectSocket() {
+        if (socket) {
+          socket.disconnect();
+        }
+
+        socket = io("http://localhost:3000", {
+          reconnectionAttempts: MAX_RETRIES,
+          reconnectionDelay: RECONNECT_DELAY,
+          timeout: 10000,
+        });
+
+        setupSocketEvents();
+      }
+
+      // Set up socket events
+      function setupSocketEvents() {
+        socket.on("connect", () => {
+            socket.emit('capabilities', {
+    encryption: ['AES-GCM-256'],
+    compression: ['none'],  // Future: add compression options
+    chunkSize: CHUNK_SIZE,
+    resumable: true,
+    integrityCheck: ['SHA-256']
+  });
+          updateConnectionStatus("Connected");
+          clearTimeout(reconnectTimeout);
+          retryCount = 0;
+          processQueue();
+        });
+
+        socket.on("disconnect", () => {
+          updateConnectionStatus("Disconnected");
+          handleDisconnect();
+        });
+
+        socket.on("connect_error", () => {
+          updateConnectionStatus("Connection Failed");
+          attemptReconnect();
+        });
+
+        socket.on("answer", async (answer) => {
+          try {
+            await peerConnection.setRemoteDescription(answer);
+          } catch (err) {
+            handleError("Answer error", err);
+          }
+        });
+
+        socket.on("ice-candidate", async (candidate) => {
+          try {
+            if (peerConnection && peerConnection.remoteDescription) {
+              await peerConnection.addIceCandidate(candidate);
+            }
+          } catch (err) {
+            handleError("ICE candidate error", err);
+          }
+        });
+
+        socket.on("transfer-status", (data) => {
+          handleTransferStatus(data);
+        });
+      }
+
+      // Start file transfer
+      async function startFileTransfer(fileEntry) {
+        if (!socket.connected) {
+          fileEntry.status = "waiting";
+          updateStatus("Waiting for connection...");
+          renderFileList();
+          return;
+        }
+
+        resetTransfer();
+
+        fileEntry.status = "connecting";
+        updateStatus(`Establishing connection for ${fileEntry.file.name}`);
+        renderFileList();
+
+        transferSessionId = generateSessionId();
+        transferStartTime = Date.now();
+
+        try {
+          await initializeWebRTC(fileEntry);
+        } catch (err) {
+          handleError("WebRTC initialization failed", err);
+          fileEntry.status = "failed";
+          renderFileList();
+          processQueue();
+        }
+      }
+
+      // Initialize WebRTC
+      async function initializeWebRTC(fileEntry) {
+        const file = fileEntry.file;
+
+        // Create RTCPeerConnection
+        const configuration = {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+          ],
+        };
+
+        peerConnection = new RTCPeerConnection(configuration);
+
+        // Create data channel with reliability options
+        dataChannel = peerConnection.createDataChannel("fileTransfer", {
+          ordered: true,
+          maxRetransmits: 30,
+        });
+
+        setupDataChannelHandlers(fileEntry);
+        await setupEncryption(file);
+        setupICECandidates();
+
+        // Create and send offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        socket.emit("offer", {
+          offer: offer,
+          sessionId: transferSessionId,
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type,
+        });
+      }
+
+      // Set up data channel handlers
+      function setupDataChannelHandlers(fileEntry) {
+        dataChannel.binaryType = "arraybuffer";
+
+        dataChannel.onopen = () => {
+          isChannelOpen = true;
+          fileEntry.status = "uploading";
+          updateStatus(`Starting upload for ${fileEntry.file.name}`);
+          renderFileList();
+          startFileUpload(fileEntry);
+        };
+
+        dataChannel.onclose = () => {
+          isChannelOpen = false;
+          if (isSending) {
+            handleTransferInterruption(fileEntry);
+          }
+        };
+
+        dataChannel.onerror = (err) => {
+          handleError("Data channel error", err);
+          isChannelOpen = false;
+          if (isSending) {
+            handleTransferInterruption(fileEntry);
+          }
+        };
+
+        dataChannel.onmessage = (event) => {
+          const message = event.data;
+
+          // The following code is commented out because the "pause," "resume," and "progress" message handling
+          // is not currently implemented. Uncomment and adapt if this functionality is required in the future.
+          // if (message === 'pause') {
+          //   isPaused = true;
+          // } else if (message === 'resume') {
+          //   isPaused = false;
+          //   if (isSending) {
+          //     continueUpload();
+          //   }
+          // } else if (message.startsWith('progress:')) {
+          //   const progress = parseInt(message.split(':')[1]);
+          if (typeof message === "string") {
+            try {
+              const parsed = JSON.parse(message);
+
+              if (parsed.type === "retry-request") {
+                // Server is requesting a retry of a specific chunk
+                if (parsed.type === "retry-request") {
+                  // Server is requesting a retry of a specific chunk
+                  const offset = parsed.offset;
+                  console.log(`Retrying chunk at offset: ${offset}`);
+
+                  // Guard clause to ensure currentFile is defined and isSending is true
+                  if (!isSending || !currentFile) {
+                    console.warn(
+                      "Retry request ignored: No active file transfer."
+                    );
+                    return;
+                  }
+
+                  // Queue a retry if we're still uploading this file
+                  retryChunk(currentFile, offset).catch((err) =>
+                    handleError("Chunk retry failed", err)
+                  );
+                  return;
+                }
+              }
+            } catch (e) {
+              console.warn("Received non-JSON string message:", message);
+            }
+          }
+        };
+      }
+
+      // Add a new function to retry specific chunks
+      async function retryChunk(fileEntry, offset) {
+        const file = fileEntry.file;
+        const chunkSize = CHUNK_SIZE;
+
+        if (offset >= file.size) return;
+
+        try {
+          // Create temporary reader for this retry
+          const tempReader = new FileReader();
+
+          // Read the chunk at the specified offset
+          const chunk = await readChunk(file, offset, chunkSize, tempReader);
+
+          // Encrypt and send the chunk
+          const packet = await encryptChunk(chunk);
+          const metadata = {
+            offset: offset,
+            fileId: fileEntry.id,
+            isLast: offset + chunk.byteLength >= file.size,
+            isRetry: true,
+          };
+
+          // Send chunk metadata, then the chunk data
+          dataChannel.send(JSON.stringify(metadata));
+          dataChannel.send(packet);
+
+          console.log(`Chunk at offset ${offset} retried successfully`);
+        } catch (err) {
+          console.error(`Failed to retry chunk at offset ${offset}:`, err);
+          throw err;
+        }
+      }
+
+      // Set up encryption
+      async function setupEncryption(file) {
+        try {
+          // Generate a strong random key
+          const rawKey = crypto.getRandomValues(new Uint8Array(32));
+
+          // Import the key properly
+          encryptionKey = await crypto.subtle.importKey(
+            "raw",
+            rawKey,
+            {
+              name: "AES-GCM",
+              length: 256,
+            },
+            false, // non-extractable for security
+            ["encrypt"]
+          );
+
+          socket.emit("metadata", {
+            protocolVersion: "1.0",
+            key: Array.from(rawKey),
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
+            sessionId: transferSessionId,
+          });
+
+          return true;
+        } catch (err) {
+          handleError("Encryption setup failed", err);
+          return false;
+        }
+      }
+
+      // Set up ICE candidates
+      function setupICECandidates() {
+        peerConnection.onicecandidate = (e) => {
+          if (e.candidate) {
+            socket.emit("ice-candidate", {
+              candidate: e.candidate,
+              sessionId: transferSessionId,
+            });
+          }
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+          switch (peerConnection.iceConnectionState) {
+            case "disconnected":
+            case "failed":
+              if (isSending) {
+                handleTransferInterruption(currentFile);
+              }
+              break;
+            case "closed":
+              break;
+          }
+        };
+      }
+
+      // Start file upload process
+      async function startFileUpload(fileEntry) {
+        const file = fileEntry.file;
+
+        if (!isChannelOpen) {
+          fileEntry.status = "waiting";
+          updateStatus("Waiting for connection...");
+          renderFileList();
+          return;
+        }
+
+        fileEntry.status = "uploading";
+        renderFileList();
+
+        isSending = true;
+        isPaused = false;
+        currentFileOffset = 0;
+
+        try {
+          // Create file reader
+          const fileReader = new FileReader();
+          currentFileReader = fileReader;
+
+          await processFile(fileEntry, fileReader);
+        } catch (err) {
+          if (err.name !== "AbortError") {
+            handleError("Upload error", err);
+            fileEntry.status = "failed";
+            renderFileList();
+          }
+        } finally {
+          finalizeTransfer(fileEntry);
+        }
+      }
+
+      // Process file in chunks
+      async function processFile(fileEntry, fileReader) {
+        const file = fileEntry.file;
+        const chunkSize = CHUNK_SIZE;
+        let offset = currentFileOffset;
+
+        updateStatus(
+          `Uploading: ${formatBytes(offset)}/${formatBytes(file.size)}`
+        );
+        updateProgress(offset, file.size);
+
+        while (offset < file.size) {
+          if (!isSending) break;
+
+          // Wait if paused or buffer is too full
+          while (
+            isPaused ||
+            (dataChannel.bufferedAmount > MAX_BUFFER && isChannelOpen)
+          ) {
             await wait(50);
-            continue;
+            if (!isSending) return;
           }
 
-          const { done, value } = await reader.read();
-          if (done) {
-            sendCompletionSignal();
-            break;
+          if (!isChannelOpen) {
+            throw new Error("Connection closed");
           }
 
-          const packet = await encryptChunk(value);
-          if (dataChannel.readyState === 'open') {
-            dataChannel.send(packet);
-            offset += value.byteLength;
+          // Read chunk
+          const chunk = await readChunk(file, offset, chunkSize, fileReader);
+
+          // Encrypt and send chunk
+          const packet = await encryptChunk(chunk);
+          const metadata = {
+            offset: offset,
+            fileId: fileEntry.id,
+            isLast: offset + chunk.byteLength >= file.size,
+          };
+
+          // Send chunk identifier first, then the chunk data
+          dataChannel.send(JSON.stringify(metadata));
+          dataChannel.send(packet);
+
+          // Update offset and progress
+          offset += chunk.byteLength;
+          currentFileOffset = offset;
+
+          // Update progress periodically (not every chunk to avoid UI bottlenecks)
+          const now = Date.now();
+          if (now - lastProgressUpdate > 200) {
             updateProgress(offset, file.size);
+            updateFileProgress(
+              fileEntry,
+              Math.round((offset / file.size) * 100)
+            );
+            lastProgressUpdate = now;
           }
         }
-      } catch (err) {
-        handleError('Upload error', err);
-      } finally {
-        cleanup();
+
+        // Final progress update
+        updateProgress(file.size, file.size);
+        updateFileProgress(fileEntry, 100);
       }
-    }
 
-    async function encryptChunk(chunk) {
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
-        encryptionKey,
-        chunk
-      );
-      const encryptedBytes = new Uint8Array(encrypted);
-      return new Uint8Array([
-        ...iv,
-        ...encryptedBytes.slice(0, -16),
-        ...encryptedBytes.slice(-16)
-      ]);
-    }
+      // Read a chunk from file
+      function readChunk(file, offset, chunkSize, fileReader) {
+        return new Promise((resolve, reject) => {
+          const slice = file.slice(offset, offset + chunkSize);
 
-    function checkChannelState() {
-      if (!isChannelOpen || dataChannel.readyState !== 'open') {
-        handleError('Channel closed during transfer');
-        return false;
+          fileReader.onload = (e) => resolve(new Uint8Array(e.target.result));
+          fileReader.onerror = (e) => reject(e);
+
+          fileReader.readAsArrayBuffer(slice);
+        });
       }
-      return true;
-    }
 
-    function sendCompletionSignal() {
-      if (dataChannel.readyState === 'open') {
-        dataChannel.send(JSON.stringify({ type: 'complete' }));
+      // Encrypt chunk
+      async function encryptChunk(chunk) {
+        try {
+          // Generate a unique IV for each chunk
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+
+          // Encrypt with GCM for authenticated encryption
+          const encrypted = await crypto.subtle.encrypt(
+            {
+              name: "AES-GCM",
+              iv,
+              tagLength: 128, // 128-bit authentication tag
+            },
+            encryptionKey,
+            chunk.buffer
+          );
+
+          // Combine IV and encrypted data for transmission
+          return new Uint8Array([...iv, ...new Uint8Array(encrypted)]);
+        } catch (err) {
+          handleError("Encryption failed", err);
+          throw err; // Re-throw to handle in the calling function
+        }
       }
-    }
 
-    function updateProgress(sent, total) {
-      const percent = Math.round((sent / total) * 100);
-      progressBar.style.width = `${percent}%`;
-      status.textContent = `Uploading: ${percent}% (${formatBytes(sent)}/${formatBytes(total)})`;
-    }
-
-    function formatBytes(bytes) {
-      const units = ['B', 'KB', 'MB', 'GB'];
-      if (bytes === 0) return '0B';
-      const exp = Math.floor(Math.log(bytes) / Math.log(1024));
-      return `${(bytes / 1024 ** exp).toFixed(2)} ${units[exp]}`;
-    }
-
-    function cleanup() {
-      isSending = false;
-      if (dataChannel.readyState === 'open') dataChannel.close();
-    }
-
-    function resetUI() {
-      progressBar.style.width = '0%';
-      status.textContent = 'Initializing...';
-    }
-
-    function handleError(message, err) {
-      console.error(message, err);
-      status.textContent = message;
-      isSending = false;
-      isChannelOpen = false;
-    }
-
-    function wait(ms) {
-      return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    // WebRTC Signaling
-    socket.on('answer', async (answer) => {
-      try {
-        await peerConnection.setRemoteDescription(answer);
-      } catch (err) {
-        handleError('Answer error', err);
+      // Continue upload after pause
+      function continueUpload() {
+        if (isSending && currentFile && isChannelOpen) {
+          processFile(currentFile, currentFileReader)
+            .catch((err) => handleError("Upload continuation error", err))
+            .finally(() => {
+              if (currentFileOffset >= currentFile.file.size) {
+                finalizeTransfer(currentFile);
+              }
+            });
+        }
       }
-    });
 
-    socket.on('ice-candidate', async (candidate) => {
-      try {
-        await peerConnection.addIceCandidate(candidate);
-      } catch (err) {
-        handleError('ICE candidate error', err);
+      // Finalize transfer
+      function finalizeTransfer(fileEntry) {
+        if (isChannelOpen && dataChannel.readyState === "open") {
+          dataChannel.send(
+            JSON.stringify({ type: "complete", fileId: fileEntry.id })
+          );
+        }
+
+        // Cleanup current transfer
+        resetTransfer();
+
+        // Mark file as completed
+        fileEntry.status = "completed";
+        updateStatus(`Upload completed for ${fileEntry.file.name}`);
+        renderFileList();
+
+        // Process next file
+        setTimeout(processQueue, 1000);
       }
-    });
-  </script>
-</body>
+
+      // Handle transfer interruption
+      function handleTransferInterruption(fileEntry) {
+        isSending = false;
+
+        if (fileEntry.retries < MAX_RETRIES) {
+          fileEntry.retries++;
+          fileEntry.status = "retrying";
+          updateStatus(
+            `Connection interrupted, retrying... (${fileEntry.retries}/${MAX_RETRIES})`
+          );
+          renderFileList();
+
+          setTimeout(() => {
+            startFileTransfer(fileEntry);
+          }, RECONNECT_DELAY);
+        } else {
+          fileEntry.status = "failed";
+          updateStatus(
+            `Upload failed for ${fileEntry.file.name} after ${MAX_RETRIES} attempts`
+          );
+          renderFileList();
+
+          resetTransfer();
+          processQueue();
+        }
+      }
+
+      // Handle transfer status from server
+      function handleTransferStatus(data) {
+        if (
+          data.status === "completed" &&
+          currentFile &&
+          data.fileId === currentFile.id
+        ) {
+          currentFile.status = "completed";
+          updateStatus(
+            `Upload completed and verified: ${currentFile.file.name}`
+          );
+          renderFileList();
+
+          resetTransfer();
+          processQueue();
+        }
+      }
+
+      // Handle disconnect
+      function handleDisconnect() {
+        if (isSending && currentFile) {
+          handleTransferInterruption(currentFile);
+        }
+
+        isChannelOpen = false;
+
+        // Attempt reconnect
+        attemptReconnect();
+      }
+
+      // Attempt to reconnect
+      function attemptReconnect() {
+        clearTimeout(reconnectTimeout);
+
+        if (retryCount >= MAX_RETRIES) {
+          updateConnectionStatus("Reconnection failed");
+          return;
+        }
+
+        retryCount++;
+        updateConnectionStatus(
+          `Reconnecting (${retryCount}/${MAX_RETRIES})...`
+        );
+
+        reconnectTimeout = setTimeout(() => {
+          connectSocket();
+        }, RECONNECT_DELAY);
+      }
+
+      // Reset transfer state
+      function resetTransfer() {
+        isSending = false;
+        isPaused = false;
+
+        if (currentFileReader) {
+          currentFileReader = null;
+        }
+
+        if (dataChannel && dataChannel.readyState === "open") {
+          dataChannel.close();
+        }
+
+        if (peerConnection) {
+          peerConnection.close();
+          peerConnection = null;
+        }
+
+        dataChannel = null;
+        isChannelOpen = false;
+      }
+
+      // Retry a failed transfer
+      function retryTransfer(fileId) {
+        const fileEntry = fileQueue.find((f) => f.id === fileId);
+        if (!fileEntry) return;
+
+        fileEntry.status = "queued";
+        fileEntry.retries = 0;
+        renderFileList();
+
+        processQueue();
+      }
+
+      // Remove file from queue
+      function removeFile(fileId) {
+        fileQueue = fileQueue.filter((f) => f.id !== fileId);
+        renderFileList();
+      }
+
+      // Update progress UI
+      function updateProgress(current, total) {
+        const percent = Math.round((current / total) * 100);
+        progressBar.style.width = `${percent}%`;
+
+        // Calculate transfer speed
+        const elapsedSeconds = (Date.now() - transferStartTime) / 1000;
+        const bytesPerSecond = current / elapsedSeconds;
+
+        updateStatus(
+          `Uploading: ${percent}% (${formatBytes(current)}/${formatBytes(
+            total
+          )}) - ${formatBytes(bytesPerSecond)}/s`
+        );
+      }
+
+      // Update file progress
+      function updateFileProgress(fileEntry, percent) {
+        fileEntry.progress = percent;
+        renderFileList();
+      }
+
+      // Render file list
+      function renderFileList() {
+        fileList.innerHTML = "";
+
+        fileQueue.forEach((file) => {
+          const fileItem = document.createElement("div");
+          fileItem.className = "file-item";
+
+          const fileInfo = document.createElement("div");
+          fileInfo.className = "file-info";
+
+          const fileName = document.createElement("div");
+          fileName.textContent = `${file.file.name} (${formatBytes(
+            file.file.size
+          )})`;
+
+          const fileProgress = document.createElement("div");
+          fileProgress.className = "progress-container";
+          fileProgress.style.height = "8px";
+          fileProgress.style.margin = "5px 0";
+
+          const progressBar = document.createElement("div");
+          progressBar.id = `progress-${file.id}`;
+          progressBar.style.width = `${file.progress}%`;
+          progressBar.style.height = "100%";
+          progressBar.style.background = getStatusColor(file.status);
+
+          fileProgress.appendChild(progressBar);
+          fileInfo.appendChild(fileName);
+          fileInfo.appendChild(fileProgress);
+
+          const statusText = document.createElement("div");
+          statusText.textContent = getStatusText(file);
+          statusText.style.fontSize = "12px";
+          statusText.style.color = "#666";
+          fileInfo.appendChild(statusText);
+
+          const fileActions = document.createElement("div");
+          fileActions.className = "file-actions";
+
+          if (file.status === "failed") {
+            const retryBtn = document.createElement("button");
+            retryBtn.className = "retry-btn";
+            retryBtn.textContent = "Retry";
+            retryBtn.onclick = () => retryTransfer(file.id);
+            fileActions.appendChild(retryBtn);
+          }
+
+          if (file.status !== "uploading") {
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "retry-btn";
+            removeBtn.style.background = "#f44336";
+            removeBtn.style.marginLeft = "5px";
+            removeBtn.textContent = "Remove";
+            removeBtn.onclick = () => removeFile(file.id);
+            fileActions.appendChild(removeBtn);
+          }
+
+          fileItem.appendChild(fileInfo);
+          fileItem.appendChild(fileActions);
+          fileList.appendChild(fileItem);
+        });
+      }
+
+      // Get status text
+      function getStatusText(file) {
+        switch (file.status) {
+          case "queued":
+            return "Queued for upload";
+          case "preparing":
+            return "Preparing...";
+          case "connecting":
+            return "Establishing connection...";
+          case "uploading":
+            return `Uploading ${file.progress}%`;
+          case "completed":
+            return "Completed";
+          case "failed":
+            return `Failed${
+              file.retries > 0 ? ` after ${file.retries} attempts` : ""
+            }`;
+          case "retrying":
+            return `Retrying (${file.retries}/${MAX_RETRIES})...`;
+          case "waiting":
+            return "Waiting for connection...";
+          default:
+            return "Unknown status";
+        }
+      }
+
+      // Get status color
+      function getStatusColor(status) {
+        switch (status) {
+          case "completed":
+            return "#4CAF50";
+          case "uploading":
+            return "#2196F3";
+          case "failed":
+            return "#f44336";
+          case "retrying":
+            return "#ff9800";
+          default:
+            return "#4CAF50";
+        }
+      }
+
+      // Update status text
+      function updateStatus(message) {
+        status.textContent = message;
+      }
+
+      // Update connection status
+      function updateConnectionStatus(message) {
+        connectionStatus.textContent = message;
+        connectionStatus.className = "connection-status";
+
+        if (message.includes("Connected")) {
+          connectionStatus.classList.add("connected");
+        } else if (message.includes("Reconnecting")) {
+          connectionStatus.classList.add("reconnecting");
+        } else {
+          connectionStatus.classList.add("disconnected");
+        }
+      }
+
+      // Helper: Format bytes to human readable
+      function formatBytes(bytes) {
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        if (bytes === 0) return "0B";
+        const exp = Math.floor(Math.log(bytes) / Math.log(1024));
+        return `${(bytes / 1024 ** exp).toFixed(2)} ${units[exp]}`;
+      }
+
+      // Helper: Generate unique ID
+      function generateFileId() {
+        return (
+          "file_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9)
+        );
+      }
+
+      // Helper: Generate session ID
+      function generateSessionId() {
+        return (
+          "session_" +
+          Date.now() +
+          "_" +
+          Math.random().toString(36).substr(2, 9)
+        );
+      }
+
+      // Helper: Wait for specified milliseconds
+      function wait(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      // Helper: Handle errors
+      function handleError(message, err) {
+        console.error(message, err);
+        updateStatus(`Error: ${message}`);
+      }
+
+      // Initialize the app when the page loads
+      window.addEventListener("DOMContentLoaded", initialize);
+    </script>
+  </body>
 </html>

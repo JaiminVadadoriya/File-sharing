@@ -135,5 +135,6 @@ dist
 
 # Optional stylelint cache
 uploads/
+temp/
 # SvelteKit build / generate output
 .svelte-kit
