@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+PORT = 3000;
+SERVER_URL = `http://localhost:${PORT}`;
+>>>>>>> 706cc9a6a8cc64bddd43443a6dc00b9145605c9a
 
 // Configuration
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
@@ -124,6 +129,9 @@ function processQueue() {
   if (!fileEntry) return;
 
   currentFile = fileEntry;
+  verifyFileIntegrity(fileEntry.file).then((hash) => {
+    currentFile.fileHash= hash;
+  });
   currentFile.status = "preparing";
   renderFileList();
 
@@ -137,7 +145,11 @@ function connectSocket() {
     socket.disconnect();
   }
 
+<<<<<<< HEAD
   socket = io(window.location.href, {
+=======
+  socket = io("http://localhost:3000", {
+>>>>>>> 706cc9a6a8cc64bddd43443a6dc00b9145605c9a
     reconnectionAttempts: MAX_RETRIES,
     reconnectionDelay: RECONNECT_DELAY,
     timeout: 10000,
@@ -174,7 +186,9 @@ function setupSocketEvents() {
 
   socket.on("answer", async (answer) => {
     try {
-      await peerConnection.setRemoteDescription(answer);
+      if (peerConnection) {
+        await peerConnection.setRemoteDescription(answer);
+      }
     } catch (err) {
       handleError("Answer error", err);
     }
@@ -192,12 +206,37 @@ function setupSocketEvents() {
 
   socket.on("transfer-status", (data) => {
     handleTransferStatus(data);
+    if (data.status === "completed") {
+      // Store the download URL if provided
+      if (data.downloadUrl) {
+        // Find the file in queue and add the download URL
+        const fileEntry = fileQueue.find((f) => f.id === data.fileId);
+        if (fileEntry) {
+          fileEntry.downloadUrl = data.downloadUrl;
+          renderFileList(); // Update the UI immediately with download link
+        }
+      }
+      console.log("Transfer completed:", data);
+      if (
+        data.name == currentFile.file.name &&
+        data.fileHash == currentFile.fileHash
+      ) {
+        // If the completed file is the current one, reset the transfer state
+        currentFile.status = "completed";
+        currentFile.downloadUrl = data.downloadUrl || null;
+        console.log(
+          `File ${currentFile.file.name} completed with download URL: ${data.downloadUrl}`
+        );
+
+        setTimeout(loadFiles, 1000);
+      }
+    }
   });
 }
 
 // Start file transfer
 async function startFileTransfer(fileEntry) {
-  if (!socket.connected) {
+  if (!socket || !socket.connected) {
     fileEntry.status = "waiting";
     updateStatus("Waiting for connection...");
     renderFileList();
@@ -298,9 +337,7 @@ function setupDataChannelHandlers(fileEntry) {
         if (parsed.type === "retry-request") {
           // Server is requesting a retry of a specific chunk
           const offset = parsed.offset;
-          console.log(
-            `Server requested retry for chunk at offset: ${offset}`
-          );
+          console.log(`Server requested retry for chunk at offset: ${offset}`);
 
           if (isSending && currentFile) {
             retryChunk(currentFile, offset).catch((err) =>
@@ -310,14 +347,9 @@ function setupDataChannelHandlers(fileEntry) {
         } else if (parsed.type === "ack") {
           // Server acknowledges successful receipt up to this offset
           console.log(
-            `Server acknowledged data up to: ${formatBytes(
-              parsed.offset
-            )}`
+            `Server acknowledged data up to: ${formatBytes(parsed.offset)}`
           );
-        } else if (
-          parsed.type === "status" &&
-          parsed.status === "completed"
-        ) {
+        } else if (parsed.type === "status" && parsed.status === "completed") {
           console.log("Server confirmed complete file receipt");
           // Handle successful completion
           if (currentFile) {
@@ -332,7 +364,20 @@ function setupDataChannelHandlers(fileEntry) {
           }
         }
       } catch (e) {
-        console.warn("Received non-JSON string message:", message);
+        // Handle non-JSON string messages
+        if (message === "resume") {
+          console.log("Server requested to resume transfer");
+          if (isPaused) {
+            isPaused = false;
+            continueUpload();
+          }
+        } else if (message.startsWith("progress:")) {
+          const progress = parseInt(message.split(":")[1]);
+          console.log(`Server reports progress: ${progress}%`);
+          // You could update UI here if needed
+        } else {
+          console.log("Server message:", message);
+        }
       }
     }
   };
@@ -476,9 +521,7 @@ async function processFile(fileEntry, fileReader) {
   let chunksSent = 0;
   let totalChunks = Math.ceil(file.size / chunkSize);
 
-  updateStatus(
-    `Uploading: ${formatBytes(offset)}/${formatBytes(file.size)}`
-  );
+  updateStatus(`Uploading: ${formatBytes(offset)}/${formatBytes(file.size)}`);
   updateProgress(offset, file.size);
 
   while (offset < file.size) {
@@ -488,13 +531,15 @@ async function processFile(fileEntry, fileReader) {
       // Wait if paused or buffer is too full
       while (
         isPaused ||
-        (dataChannel.bufferedAmount > MAX_BUFFER && isChannelOpen)
+        (dataChannel &&
+          dataChannel.bufferedAmount > MAX_BUFFER &&
+          isChannelOpen)
       ) {
         await wait(50);
         if (!isSending) return;
       }
 
-      if (!isChannelOpen) {
+      if (!isChannelOpen || !dataChannel) {
         throw new Error("Connection closed");
       }
 
@@ -539,10 +584,7 @@ async function processFile(fileEntry, fileReader) {
       const now = Date.now();
       if (now - lastProgressUpdate > 200) {
         updateProgress(offset, file.size);
-        updateFileProgress(
-          fileEntry,
-          Math.round((offset / file.size) * 100)
-        );
+        updateFileProgress(fileEntry, Math.round((offset / file.size) * 100));
         lastProgressUpdate = now;
 
         // Log progress for large files
@@ -584,12 +626,9 @@ async function processFile(fileEntry, fileReader) {
   }
 
   // Ensure all data has been sent before signaling completion
-  while (dataChannel.bufferedAmount > 0) {
-    await wait(100);
+  if (dataChannel && dataChannel.bufferedAmount > 0) {
+    await wait(2000); // Wait longer for buffer to clear
   }
-
-  // Wait a bit longer to ensure all data has been processed on the server
-  await wait(1000);
 
   // Final progress update
   updateProgress(file.size, file.size);
@@ -650,10 +689,22 @@ function continueUpload() {
 }
 
 // Finalize transfer
-// Finalize transfer
 function finalizeTransfer(fileEntry) {
+  if(currentFile.status == "completed") {
+    // Cleanup current transfer
+    resetTransfer();
+
+    // Mark file as completed
+    fileEntry.status = "completed";
+    updateStatus(`Upload completed for ${fileEntry.file.name}`);
+    renderFileList();
+
+    // Process next file
+    setTimeout(processQueue, 1000);
+    return;
+  }
   // First, confirm with server that all chunks were received
-  if (isChannelOpen && dataChannel.readyState === "open") {
+  if (isChannelOpen && dataChannel && dataChannel.readyState === "open") {
     dataChannel.send(
       JSON.stringify({
         type: "verify",
@@ -665,7 +716,7 @@ function finalizeTransfer(fileEntry) {
 
     // Wait for server confirmation before sending complete signal
     setTimeout(() => {
-      if (isChannelOpen && dataChannel.readyState === "open") {
+      if (isChannelOpen && dataChannel && dataChannel.readyState === "open") {
         dataChannel.send(
           JSON.stringify({ type: "complete", fileId: fileEntry.id })
         );
@@ -721,15 +772,16 @@ function handleTransferInterruption(fileEntry) {
 
 // Handle transfer status from server
 function handleTransferStatus(data) {
-  if (
-    data.status === "completed" &&
-    currentFile &&
-    data.fileId === currentFile.id
-  ) {
+  if (data.status === "completed" && currentFile && data.fileHash === currentFile.fileHash) {
     currentFile.status = "completed";
-    updateStatus(
-      `Upload completed and verified: ${currentFile.file.name}`
-    );
+    console.log("dokho");
+
+    // Store the download URL if provided
+    if (data.downloadUrl) {
+      currentFile.downloadUrl = data.downloadUrl;
+    }
+
+    updateStatus(`Upload completed and verified: ${currentFile.file.name}`);
     renderFileList();
 
     resetTransfer();
@@ -737,7 +789,7 @@ function handleTransferStatus(data) {
   } else if (
     data.status === "incomplete" &&
     currentFile &&
-    data.fileId === currentFile.id
+    data.fileHash === currentFile.fileHash
   ) {
     // Server indicates that not all data has been received
     console.log(
@@ -745,7 +797,7 @@ function handleTransferStatus(data) {
     );
 
     // We might need to resend missing chunks
-    if (isChannelOpen && dataChannel.readyState === "open") {
+    if (isChannelOpen && dataChannel && dataChannel.readyState === "open") {
       // Just wait for server to request specific chunks if needed
       updateStatus(`Verifying data, please wait...`);
     }
@@ -774,9 +826,7 @@ function attemptReconnect() {
   }
 
   retryCount++;
-  updateConnectionStatus(
-    `Reconnecting (${retryCount}/${MAX_RETRIES})...`
-  );
+  updateConnectionStatus(`Reconnecting (${retryCount}/${MAX_RETRIES})...`);
 
   reconnectTimeout = setTimeout(() => {
     connectSocket();
@@ -857,9 +907,7 @@ function renderFileList() {
     fileInfo.className = "file-info";
 
     const fileName = document.createElement("div");
-    fileName.textContent = `${file.file.name} (${formatBytes(
-      file.file.size
-    )})`;
+    fileName.textContent = `${file.file.name} (${formatBytes(file.file.size)})`;
 
     const fileProgress = document.createElement("div");
     fileProgress.className = "progress-container";
@@ -980,18 +1028,13 @@ function formatBytes(bytes) {
 
 // Helper: Generate unique ID
 function generateFileId() {
-  return (
-    "file_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9)
-  );
+  return "file_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9);
 }
 
 // Helper: Generate session ID
 function generateSessionId() {
   return (
-    "session_" +
-    Date.now() +
-    "_" +
-    Math.random().toString(36).substr(2, 9)
+    "session_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9)
   );
 }
 
@@ -1015,26 +1058,51 @@ async function loadFiles() {
     }
 
     const data = await response.json();
-    renderFileListings(data.files);
+
+    // Check if fileListings element exists before trying to render
+    const fileListingsElement = document.getElementById("fileListings");
+    if (fileListingsElement) {
+      renderFileListings(data.files);
+    } else {
+      console.warn("fileListings element not found, skipping render");
+      // Optionally create the element if it doesn't exist
+      const container = document.createElement("div");
+      container.id = "fileListings";
+      container.className = "file-listings-container";
+      document.body.appendChild(container); // Add to document
+      renderFileListings(data.files);
+    }
   } catch (err) {
     console.error("Error loading files:", err);
-    document.getElementById("fileListings").innerHTML = `
-  <div class="no-files">
-    <p>Error loading files. <button class="refresh-btn" onclick="loadFiles()">Retry</button></p>
-  </div>
-`;
+
+    // Safely handle missing elements
+    const fileListingsElement = document.getElementById("fileListings");
+    if (fileListingsElement) {
+      fileListingsElement.innerHTML = `
+          <div class="no-files">
+            <p>Error loading files. <button class="refresh-btn" onclick="loadFiles()">Retry</button></p>
+          </div>
+        `;
+    }
   }
 }
 
+// Add this function to your client code
 function renderFileListings(files) {
   const container = document.getElementById("fileListings");
 
+  // Check if the container exists
+  if (!container) {
+    console.error("fileListings container not found in the DOM");
+    return; // Exit if container doesn't exist
+  }
+
   if (!files || files.length === 0) {
     container.innerHTML = `
-  <div class="no-files">
-    <p>No files available for download.</p>
-  </div>
-`;
+        <div class="no-files">
+          <p>No files available for download.</p>
+        </div>
+      `;
     return;
   }
 
@@ -1045,26 +1113,97 @@ function renderFileListings(files) {
     const created = new Date(file.created).toLocaleString();
 
     html += `
-  <div class="file-listing" id="file-${file.id}">
-    <div class="file-listing-info">
-      <div class="file-name">${escapeHTML(file.name)}</div>
-      <div class="file-meta">
-        Size: ${formatBytes(file.size)} • Uploaded: ${created}
-      </div>
-    </div>
-    <div class="file-actions">
-      <a href="/api/download/${
-        file.id
-      }" class="download-btn" download>Download</a>
-      <button class="delete-btn" onclick="deleteFile('${
-        file.id
-      }', '${escapeHTML(file.name)}')">Delete</button>
-    </div>
-  </div>
-`;
+        <div class="file-listing" id="file-${file.id}">
+          <div class="file-listing-info">
+            <div class="file-name">${escapeHTML(file.name)}</div>
+            <div class="file-meta">
+              Size: ${formatBytes(file.size)} • Uploaded: ${created}
+            </div>
+          </div>
+          <div class="file-actions">
+            <a href="/api/download/${
+              file.id
+            }" class="download-btn" download>Download</a>
+            <button class="delete-btn" onclick="deleteFile('${
+              file.id
+            }', '${escapeHTML(file.name)}')">Delete</button>
+          </div>
+        </div>
+      `;
   });
 
   container.innerHTML = html;
+}
+
+function renderFileList() {
+  fileList.innerHTML = "";
+
+  fileQueue.forEach((file) => {
+    const fileItem = document.createElement("div");
+    fileItem.className = "file-item";
+
+    const fileInfo = document.createElement("div");
+    fileInfo.className = "file-info";
+
+    const fileName = document.createElement("div");
+    fileName.textContent = `${file.file.name} (${formatBytes(file.file.size)})`;
+
+    const fileProgress = document.createElement("div");
+    fileProgress.className = "progress-container";
+    fileProgress.style.height = "8px";
+    fileProgress.style.margin = "5px 0";
+
+    const progressBar = document.createElement("div");
+    progressBar.id = `progress-${file.id}`;
+    progressBar.style.width = `${file.progress}%`;
+    progressBar.style.height = "100%";
+    progressBar.style.background = getStatusColor(file.status);
+
+    fileProgress.appendChild(progressBar);
+    fileInfo.appendChild(fileName);
+    fileInfo.appendChild(fileProgress);
+
+    const statusText = document.createElement("div");
+    statusText.textContent = getStatusText(file);
+    statusText.style.fontSize = "12px";
+    statusText.style.color = "#666";
+    fileInfo.appendChild(statusText);
+
+    const fileActions = document.createElement("div");
+    fileActions.className = "file-actions";
+
+    // If file has a download URL and is completed, show download button
+    if (file.status === "completed" && file.downloadUrl) {
+      const downloadBtn = document.createElement("a");
+      downloadBtn.className = "download-btn";
+      downloadBtn.href = file.downloadUrl;
+      downloadBtn.textContent = "Download";
+      downloadBtn.download = file.file.name; // Set suggested filename
+      fileActions.appendChild(downloadBtn);
+    }
+
+    if (file.status === "failed") {
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "retry-btn";
+      retryBtn.textContent = "Retry";
+      retryBtn.onclick = () => retryTransfer(file.id);
+      fileActions.appendChild(retryBtn);
+    }
+
+    if (file.status !== "uploading") {
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "retry-btn";
+      removeBtn.style.background = "#f44336";
+      removeBtn.style.marginLeft = "5px";
+      removeBtn.textContent = "Remove";
+      removeBtn.onclick = () => removeFile(file.id);
+      fileActions.appendChild(removeBtn);
+    }
+
+    fileItem.appendChild(fileInfo);
+    fileItem.appendChild(fileActions);
+    fileList.appendChild(fileItem);
+  });
 }
 
 async function deleteFile(fileId, fileName) {
@@ -1108,16 +1247,60 @@ function escapeHTML(str) {
     .replace(/'/g, "&#039;");
 }
 
+async function verifyFileIntegrity(file) {
+  try {
+    // Create a FileReader to read the file
+    const fileReader = new FileReader();
+
+    // Return a promise that resolves when the file is read and the hash is calculated
+    return new Promise((resolve, reject) => {
+      fileReader.onload = async () => {
+        try {
+          // Get the file buffer (ArrayBuffer)
+          const fileBuffer = fileReader.result;
+
+          // Calculate the SHA-256 hash using crypto.subtle.digest
+          const hashBuffer = await crypto.subtle.digest("SHA-256", fileBuffer);
+
+          // Convert the hash buffer into a hex string
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          const hashHex = hashArray
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join("");
+
+          // Return the calculated hash
+          resolve(hashHex);
+        } catch (err) {
+          console.error(`Error calculating hash: ${err.message}`);
+          reject(err);
+        }
+      };
+
+      // Handle any error that occurs during the file reading process
+      fileReader.onerror = () => {
+        console.error("Error reading file:", fileReader.error);
+        reject(fileReader.error);
+      };
+
+      // Read the file as an ArrayBuffer
+      fileReader.readAsArrayBuffer(file);
+    });
+  } catch (err) {
+    console.error(`Integrity verification failed: ${err.message}`);
+    return null;
+  }
+}
+
 // Load files when page is ready
 document.addEventListener("DOMContentLoaded", () => {
   loadFiles();
 
   // Refresh file list when a file upload completes
-  socket.on("transfer-status", (data) => {
-    if (data.status === "completed") {
-      setTimeout(loadFiles, 1000);
-    }
-  });
+  // socket.on("transfer-status", (data) => {
+  //   if (data.status === "completed") {
+  //     setTimeout(loadFiles, 1000);
+  //   }
+  // });
 });
 
 // Initialize the app when the page loads
