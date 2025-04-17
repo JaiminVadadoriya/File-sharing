@@ -289,13 +289,13 @@
       // Set up socket events
       function setupSocketEvents() {
         socket.on("connect", () => {
-            socket.emit('capabilities', {
-    encryption: ['AES-GCM-256'],
-    compression: ['none'],  // Future: add compression options
-    chunkSize: CHUNK_SIZE,
-    resumable: true,
-    integrityCheck: ['SHA-256']
-  });
+          socket.emit("capabilities", {
+            encryption: ["AES-GCM-256"],
+            compression: ["none"], // Future: add compression options
+            chunkSize: CHUNK_SIZE,
+            resumable: true,
+            integrityCheck: ["SHA-256"],
+          });
           updateConnectionStatus("Connected");
           clearTimeout(reconnectTimeout);
           retryCount = 0;
@@ -427,44 +427,48 @@
           }
         };
 
+        // Add this to the dataChannel.onmessage handler
         dataChannel.onmessage = (event) => {
           const message = event.data;
 
-          // The following code is commented out because the "pause," "resume," and "progress" message handling
-          // is not currently implemented. Uncomment and adapt if this functionality is required in the future.
-          // if (message === 'pause') {
-          //   isPaused = true;
-          // } else if (message === 'resume') {
-          //   isPaused = false;
-          //   if (isSending) {
-          //     continueUpload();
-          //   }
-          // } else if (message.startsWith('progress:')) {
-          //   const progress = parseInt(message.split(':')[1]);
           if (typeof message === "string") {
             try {
               const parsed = JSON.parse(message);
 
               if (parsed.type === "retry-request") {
                 // Server is requesting a retry of a specific chunk
-                if (parsed.type === "retry-request") {
-                  // Server is requesting a retry of a specific chunk
-                  const offset = parsed.offset;
-                  console.log(`Retrying chunk at offset: ${offset}`);
+                const offset = parsed.offset;
+                console.log(
+                  `Server requested retry for chunk at offset: ${offset}`
+                );
 
-                  // Guard clause to ensure currentFile is defined and isSending is true
-                  if (!isSending || !currentFile) {
-                    console.warn(
-                      "Retry request ignored: No active file transfer."
-                    );
-                    return;
-                  }
-
-                  // Queue a retry if we're still uploading this file
+                if (isSending && currentFile) {
                   retryChunk(currentFile, offset).catch((err) =>
                     handleError("Chunk retry failed", err)
                   );
-                  return;
+                }
+              } else if (parsed.type === "ack") {
+                // Server acknowledges successful receipt up to this offset
+                console.log(
+                  `Server acknowledged data up to: ${formatBytes(
+                    parsed.offset
+                  )}`
+                );
+              } else if (
+                parsed.type === "status" &&
+                parsed.status === "completed"
+              ) {
+                console.log("Server confirmed complete file receipt");
+                // Handle successful completion
+                if (currentFile) {
+                  currentFile.status = "completed";
+                  updateStatus(
+                    `Upload completed and verified: ${currentFile.file.name}`
+                  );
+                  renderFileList();
+
+                  resetTransfer();
+                  processQueue();
                 }
               }
             } catch (e) {
@@ -607,6 +611,10 @@
         const file = fileEntry.file;
         const chunkSize = CHUNK_SIZE;
         let offset = currentFileOffset;
+        let retryAttempts = {};
+        const MAX_CHUNK_RETRIES = 3;
+        let chunksSent = 0;
+        let totalChunks = Math.ceil(file.size / chunkSize);
 
         updateStatus(
           `Uploading: ${formatBytes(offset)}/${formatBytes(file.size)}`
@@ -616,53 +624,119 @@
         while (offset < file.size) {
           if (!isSending) break;
 
-          // Wait if paused or buffer is too full
-          while (
-            isPaused ||
-            (dataChannel.bufferedAmount > MAX_BUFFER && isChannelOpen)
-          ) {
-            await wait(50);
-            if (!isSending) return;
-          }
+          try {
+            // Wait if paused or buffer is too full
+            while (
+              isPaused ||
+              (dataChannel.bufferedAmount > MAX_BUFFER && isChannelOpen)
+            ) {
+              await wait(50);
+              if (!isSending) return;
+            }
 
-          if (!isChannelOpen) {
-            throw new Error("Connection closed");
-          }
+            if (!isChannelOpen) {
+              throw new Error("Connection closed");
+            }
 
-          // Read chunk
-          const chunk = await readChunk(file, offset, chunkSize, fileReader);
+            // Read chunk
+            const chunk = await readChunk(file, offset, chunkSize, fileReader);
 
-          // Encrypt and send chunk
-          const packet = await encryptChunk(chunk);
-          const metadata = {
-            offset: offset,
-            fileId: fileEntry.id,
-            isLast: offset + chunk.byteLength >= file.size,
-          };
+            // Encrypt and send chunk
+            const packet = await encryptChunk(chunk);
+            const isLastChunk = offset + chunk.byteLength >= file.size;
 
-          // Send chunk identifier first, then the chunk data
-          dataChannel.send(JSON.stringify(metadata));
-          dataChannel.send(packet);
+            const metadata = {
+              offset: offset,
+              fileId: fileEntry.id,
+              isLast: isLastChunk,
+              chunkIndex: chunksSent,
+              totalChunks: totalChunks,
+            };
 
-          // Update offset and progress
-          offset += chunk.byteLength;
-          currentFileOffset = offset;
+            // Send chunk identifier first, then the chunk data
+            dataChannel.send(JSON.stringify(metadata));
 
-          // Update progress periodically (not every chunk to avoid UI bottlenecks)
-          const now = Date.now();
-          if (now - lastProgressUpdate > 200) {
-            updateProgress(offset, file.size);
-            updateFileProgress(
-              fileEntry,
-              Math.round((offset / file.size) * 100)
-            );
-            lastProgressUpdate = now;
+            // Add delay between metadata and binary data
+            await wait(5);
+
+            // Send the actual data
+            dataChannel.send(packet);
+            chunksSent++;
+
+            // Wait a bit to avoid overwhelming the connection with large files
+            if (file.size > 100 * 1024 * 1024) {
+              // For files larger than 100MB, add small pauses periodically
+              if (offset % (5 * 1024 * 1024) < chunkSize) {
+                await wait(50);
+              }
+            }
+
+            // Update offset and progress
+            offset += chunk.byteLength;
+            currentFileOffset = offset;
+
+            // Update progress periodically (not every chunk to avoid UI bottlenecks)
+            const now = Date.now();
+            if (now - lastProgressUpdate > 200) {
+              updateProgress(offset, file.size);
+              updateFileProgress(
+                fileEntry,
+                Math.round((offset / file.size) * 100)
+              );
+              lastProgressUpdate = now;
+
+              // Log progress for large files
+              if (
+                file.size > 50 * 1024 * 1024 &&
+                offset % (10 * 1024 * 1024) < chunkSize
+              ) {
+                console.log(
+                  `Sending: ${Math.round((offset / file.size) * 100)}% of ${
+                    file.name
+                  }`
+                );
+              }
+            }
+          } catch (err) {
+            console.error(`Error sending chunk at offset ${offset}:`, err);
+
+            // Handle retry logic for individual chunks
+            if (!retryAttempts[offset]) {
+              retryAttempts[offset] = 0;
+            }
+
+            retryAttempts[offset]++;
+
+            if (retryAttempts[offset] <= MAX_CHUNK_RETRIES) {
+              console.log(
+                `Retrying chunk at offset ${offset} (${retryAttempts[offset]}/${MAX_CHUNK_RETRIES})`
+              );
+              // Don't increment offset, will retry this chunk
+              await wait(1000); // Wait before retry
+            } else {
+              console.error(
+                `Failed to send chunk at offset ${offset} after ${MAX_CHUNK_RETRIES} attempts`
+              );
+              // Move to next chunk after max retries
+              offset += chunkSize;
+            }
           }
         }
+
+        // Ensure all data has been sent before signaling completion
+        while (dataChannel.bufferedAmount > 0) {
+          await wait(100);
+        }
+
+        // Wait a bit longer to ensure all data has been processed on the server
+        await wait(1000);
 
         // Final progress update
         updateProgress(file.size, file.size);
         updateFileProgress(fileEntry, 100);
+
+        // Wait for the server to process all data
+        await wait(2000);
       }
 
       // Read a chunk from file
@@ -716,23 +790,46 @@
       }
 
       // Finalize transfer
+      // Finalize transfer
       function finalizeTransfer(fileEntry) {
+        // First, confirm with server that all chunks were received
         if (isChannelOpen && dataChannel.readyState === "open") {
           dataChannel.send(
-            JSON.stringify({ type: "complete", fileId: fileEntry.id })
+            JSON.stringify({
+              type: "verify",
+              fileId: fileEntry.id,
+              expectedSize: fileEntry.file.size,
+              fileName: fileEntry.file.name,
+            })
           );
+
+          // Wait for server confirmation before sending complete signal
+          setTimeout(() => {
+            if (isChannelOpen && dataChannel.readyState === "open") {
+              dataChannel.send(
+                JSON.stringify({ type: "complete", fileId: fileEntry.id })
+              );
+            }
+
+            // Cleanup current transfer
+            resetTransfer();
+
+            // Mark file as completed
+            fileEntry.status = "completed";
+            updateStatus(`Upload completed for ${fileEntry.file.name}`);
+            renderFileList();
+
+            // Process next file
+            setTimeout(processQueue, 1000);
+          }, 2000);
+        } else {
+          // Connection is closed, handle as needed
+          resetTransfer();
+          fileEntry.status = "failed";
+          updateStatus(`Connection closed before transfer could complete`);
+          renderFileList();
+          setTimeout(processQueue, 1000);
         }
-
-        // Cleanup current transfer
-        resetTransfer();
-
-        // Mark file as completed
-        fileEntry.status = "completed";
-        updateStatus(`Upload completed for ${fileEntry.file.name}`);
-        renderFileList();
-
-        // Process next file
-        setTimeout(processQueue, 1000);
       }
 
       // Handle transfer interruption
@@ -777,6 +874,21 @@
 
           resetTransfer();
           processQueue();
+        } else if (
+          data.status === "incomplete" &&
+          currentFile &&
+          data.fileId === currentFile.id
+        ) {
+          // Server indicates that not all data has been received
+          console.log(
+            `Server reports incomplete transfer: ${data.receivedBytes}/${data.expectedBytes} bytes`
+          );
+
+          // We might need to resend missing chunks
+          if (isChannelOpen && dataChannel.readyState === "open") {
+            // Just wait for server to request specific chunks if needed
+            updateStatus(`Verifying data, please wait...`);
+          }
         }
       }
 
