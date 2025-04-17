@@ -6,9 +6,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const dotenv = require("dotenv");
 
 const { webcrypto } = require("crypto");
 const { subtle } = webcrypto;
+
+dotenv.config({ path: ".env" });
 
 const app = express();
 const server = http.createServer(app);
@@ -948,8 +951,8 @@ app.delete("/api/files/:fileId", (req, res) => {
 app.use(express.static(path.join(__dirname, "public")));
 
 // Start server
-server.listen(3000, () => {
-  console.log("Server running on http://localhost:3000");
+server.listen(process.env.PORT || 8000, () => {
+  console.log("Server running on http://localhost:"+ (process.env.PORT || 8000));
   console.log(`Upload directory: ${UPLOAD_DIR}`);
   console.log(`Temporary directory: ${TEMP_DIR}`);
 });
