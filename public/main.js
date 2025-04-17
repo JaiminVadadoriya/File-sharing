@@ -1,9 +1,4 @@
-<<<<<<< HEAD
-=======
-PORT = 3000;
-SERVER_URL = `http://localhost:${PORT}`;
->>>>>>> 706cc9a6a8cc64bddd43443a6dc00b9145605c9a
-
+// File: public/main.js
 // Configuration
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 const MAX_BUFFER = 1 * 1024 * 1024; // 1MB buffer limit
@@ -145,11 +140,7 @@ function connectSocket() {
     socket.disconnect();
   }
 
-<<<<<<< HEAD
   socket = io(window.location.href, {
-=======
-  socket = io("http://localhost:3000", {
->>>>>>> 706cc9a6a8cc64bddd43443a6dc00b9145605c9a
     reconnectionAttempts: MAX_RETRIES,
     reconnectionDelay: RECONNECT_DELAY,
     timeout: 10000,
