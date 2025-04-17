@@ -6,9 +6,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const dotenv = require("dotenv");
 
 const { webcrypto } = require("crypto");
 const { subtle } = webcrypto;
+
+dotenv.config({ path: ".env" });
 
 const app = express();
 const server = http.createServer(app);
@@ -846,12 +849,110 @@ app.get("/api/status", (req, res) => {
   res.json(status);
 });
 
+// List available files
+app.get("/api/files", (req, res) => {
+  try {
+    const files = fs.readdirSync(UPLOAD_DIR)
+      .filter(file => !file.startsWith('.')) // Skip hidden files
+      .map(fileName => {
+        const filePath = path.join(UPLOAD_DIR, fileName);
+        const stats = fs.statSync(filePath);
+        
+        // Extract original name if available (from timestamp_originalname format)
+        let displayName = fileName;
+        const nameParts = fileName.split('_');
+        if (nameParts.length > 1 && !isNaN(nameParts[0])) {
+          // Remove timestamp prefix
+          displayName = fileName.substring(fileName.indexOf('_') + 1);
+        }
+        
+        return {
+          id: Buffer.from(fileName).toString('base64url'),
+          name: displayName,
+          originalName: displayName,
+          size: stats.size,
+          created: stats.birthtime,
+          path: fileName
+        };
+      })
+      .sort((a, b) => b.created - a.created); // Sort by newest first
+      
+    res.json({ files });
+  } catch (err) {
+    console.error("Error listing files:", err);
+    res.status(500).json({ error: "Failed to list files" });
+  }
+});
+
+// Download a file
+app.get("/api/download/:fileId", (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    const fileName = Buffer.from(fileId, 'base64url').toString();
+    const filePath = path.join(UPLOAD_DIR, fileName);
+    
+    // Verify file exists
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    
+    // Determine content type (default to octet-stream)
+    const fileStats = fs.statSync(filePath);
+    
+    // Extract original name if available
+    let displayName = fileName;
+    const nameParts = fileName.split('_');
+    if (nameParts.length > 1 && !isNaN(nameParts[0])) {
+      // Remove timestamp prefix
+      displayName = fileName.substring(fileName.indexOf('_') + 1);
+    }
+    
+    // Set content disposition and type
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(displayName)}"`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', fileStats.size);
+    
+    // Stream the file
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    
+    // Log the download
+    console.log(`File download started: ${displayName} (${formatBytes(fileStats.size)})`);
+  } catch (err) {
+    console.error("Download error:", err);
+    res.status(500).json({ error: "Failed to download file" });
+  }
+});
+
+// Delete a file
+app.delete("/api/files/:fileId", (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    const fileName = Buffer.from(fileId, 'base64url').toString();
+    const filePath = path.join(UPLOAD_DIR, fileName);
+    
+    // Verify file exists
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    
+    // Delete the file
+    fs.unlinkSync(filePath);
+    console.log(`File deleted: ${fileName}`);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Delete error:", err);
+    res.status(500).json({ error: "Failed to delete file" });
+  }
+});
+
 // Serve static files (like index.html)
 app.use(express.static(path.join(__dirname, "public")));
 
 // Start server
-server.listen(3000, () => {
-  console.log("Server running on http://localhost:3000");
+server.listen(process.env.PORT || 8000, () => {
+  console.log("Server running on http://localhost:"+ (process.env.PORT || 8000));
   console.log(`Upload directory: ${UPLOAD_DIR}`);
   console.log(`Temporary directory: ${TEMP_DIR}`);
 });
