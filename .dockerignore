@@ -1,0 +1,65 @@
+# Ignore node modules and dependencies
+node_modules/
+bower_components/
+jspm_packages/
+web_modules/
+.yarn/
+.pnp.*
+
+# Ignore build artifacts
+dist/
+build/
+.temp/
+.webpack/
+.nuxt/
+.next/
+out/
+.svelte-kit/
+
+# Ignore caches and logs
+.cache/
+.parcel-cache/
+.docusaurus/
+.nyc_output/
+coverage/
+*.log
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+.rpt2_cache/
+.rts2_cache_*/
+
+# Ignore environment files
+.env
+.env.*
+!.env.example  # Keep a template, optional
+
+# Ignore diagnostic and runtime data
+*.pid
+*.seed
+*.tgz
+*.pid.lock
+*.json
+*.repl_history
+report.*
+
+# Ignore data or output JSONs, but not critical package metadata
+!package.json
+!package-lock.json
+
+# Ignore VSCode and editor configs
+.vscode/
+.vscode-test/
+*.swp
+
+# Ignore uploads/temp if not needed in image
+uploads/
+temp/
+
+# Ignore Git-related stuff
+.git
+.gitignore
+
+# Docker itself
+Dockerfile
+.dockerignore
